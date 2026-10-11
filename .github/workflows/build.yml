@@ -11,6 +11,11 @@ on:
         description: 'Talos release version (e.g. v1.13.9)'
         required: false
         default: ''
+      force_rebuild:
+        description: 'Force rebuild even if image already exists'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -40,12 +45,12 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
           IMAGE="ghcr.io/${{ github.repository_owner }}/siderolabs/kernel:${TAG}"
           echo "Checking if $IMAGE already exists..."
-          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+          if [ "${{ github.event.inputs.force_rebuild }}" != "true" ] && docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
             echo "already_built=true" >> $GITHUB_OUTPUT
             echo "Kernel image for ${TAG} already exists. Skipping build."
           else
             echo "already_built=false" >> $GITHUB_OUTPUT
-            echo "Kernel image for ${TAG} does not exist yet. Proceeding with build."
+            echo "Proceeding with build."
           fi
 
       - name: Checkout siderolabs/pkgs
