@@ -38,8 +38,9 @@ jobs:
         id: check_image
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          # Prüfen ob Manifest für diesen Tag bereits im eigenen Registry existiert
-          if docker manifest inspect "ghcr.io/${{ github.repository_owner }}/kernel:${TAG}" >/dev/null 2>&1; then
+          IMAGE="ghcr.io/${{ github.repository_owner }}/siderolabs/kernel:${TAG}"
+          echo "Checking if $IMAGE already exists..."
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
             echo "already_built=true" >> $GITHUB_OUTPUT
             echo "Kernel image for ${TAG} already exists. Skipping build."
           else
@@ -60,14 +61,23 @@ jobs:
           CONFIG_FILE="kernel/build/config-amd64"
           if [ -f "$CONFIG_FILE" ]; then
             echo "Configuring $CONFIG_FILE for AMD XDNA..."
-            # Deaktiviere 'not set' und aktiviere Modul
-            sed -i '/CONFIG_DRM_ACCEL_AMDXDNA/d' "$CONFIG_FILE"
-            echo "CONFIG_DRM_ACCEL_AMDXDNA=m" >> "$CONFIG_FILE"
             
-            # Abhängigkeiten prüfen (DRM_ACCEL, IOMMU, SVA)
-            sed -i '/CONFIG_DRM_ACCEL/d' "$CONFIG_FILE"
-            echo "CONFIG_DRM_ACCEL=y" >> "$CONFIG_FILE"
+            # 1. AMDXDNA als Kernelmodul aktivieren (=m)
+            if grep -q "CONFIG_DRM_ACCEL_AMDXDNA" "$CONFIG_FILE"; then
+              sed -i 's/^# CONFIG_DRM_ACCEL_AMDXDNA is not set/CONFIG_DRM_ACCEL_AMDXDNA=m/' "$CONFIG_FILE"
+              sed -i 's/^CONFIG_DRM_ACCEL_AMDXDNA=.*/CONFIG_DRM_ACCEL_AMDXDNA=m/' "$CONFIG_FILE"
+            else
+              echo "CONFIG_DRM_ACCEL_AMDXDNA=m" >> "$CONFIG_FILE"
+            fi
             
+            # 2. DRM_ACCEL sicherstellen (=y)
+            if grep -q "^CONFIG_DRM_ACCEL=" "$CONFIG_FILE"; then
+              sed -i 's/^CONFIG_DRM_ACCEL=.*/CONFIG_DRM_ACCEL=y/' "$CONFIG_FILE"
+            else
+              echo "CONFIG_DRM_ACCEL=y" >> "$CONFIG_FILE"
+            fi
+            
+            echo "--- Verifying Config ---"
             grep -E "CONFIG_DRM_ACCEL" "$CONFIG_FILE"
           else
             echo "Error: $CONFIG_FILE not found!"
@@ -100,4 +110,5 @@ jobs:
             REGISTRY="ghcr.io/${{ github.repository_owner }}" \
             TAG="${TAG}" \
             PLATFORM="linux/amd64" \
+            CI_ARGS="--cache-from=type=gha --cache-to=type=gha,mode=max" \
             PUSH=true
