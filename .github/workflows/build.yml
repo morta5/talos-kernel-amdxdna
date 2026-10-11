@@ -1,0 +1,101 @@
+name: Build Talos Kernel with AMD XDNA NPU
+
+on:
+  schedule:
+    # Maximal einmal pro Woche: Jeden Sonntag um 03:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    # Ermöglicht manuelles Triggern im GitHub UI mit optionalem Tag
+    inputs:
+      talos_version:
+        description: 'Talos release version (e.g. v1.13.9)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Target Talos Version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.talos_version }}" ]; then
+            TARGET_TAG="${{ github.event.inputs.talos_version }}"
+          else
+            TARGET_TAG=$(curl -s https://api.github.com/repos/siderolabs/talos/releases/latest | jq -r '.tag_name')
+          fi
+          echo "tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "Target Talos Version: ${TARGET_TAG}"
+
+      - name: Check if image already exists in GHCR
+        id: check_image
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          # Prüfen ob Manifest für diesen Tag bereits im eigenen Registry existiert
+          if docker manifest inspect "ghcr.io/${{ github.repository_owner }}/kernel:${TAG}" >/dev/null 2>&1; then
+            echo "already_built=true" >> $GITHUB_OUTPUT
+            echo "Kernel image for ${TAG} already exists. Skipping build."
+          else
+            echo "already_built=false" >> $GITHUB_OUTPUT
+            echo "Kernel image for ${TAG} does not exist yet. Proceeding with build."
+          fi
+
+      - name: Checkout siderolabs/pkgs
+        if: steps.check_image.outputs.already_built == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: siderolabs/pkgs
+          # Extrahiere Minor-Branch, z.B. v1.13.9 -> release-1.13
+          ref: ${{ startsWith(steps.version.outputs.tag, 'v') && format('release-{0}', join(slice(split(steps.version.outputs.tag, '.'), 0, 2), '.')) || 'main' }}
+
+      - name: Enable AMD XDNA NPU in Kernel Config
+        if: steps.check_image.outputs.already_built == 'false'
+        run: |
+          CONFIG_FILE="kernel/build/config-amd64"
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "Configuring $CONFIG_FILE for AMD XDNA..."
+            # Deaktiviere 'not set' und aktiviere Modul
+            sed -i '/CONFIG_DRM_ACCEL_AMDXDNA/d' "$CONFIG_FILE"
+            echo "CONFIG_DRM_ACCEL_AMDXDNA=m" >> "$CONFIG_FILE"
+            
+            # Abhängigkeiten prüfen (DRM_ACCEL, IOMMU, SVA)
+            sed -i '/CONFIG_DRM_ACCEL/d' "$CONFIG_FILE"
+            echo "CONFIG_DRM_ACCEL=y" >> "$CONFIG_FILE"
+            
+            grep -E "CONFIG_DRM_ACCEL" "$CONFIG_FILE"
+          else
+            echo "Error: $CONFIG_FILE not found!"
+            exit 1
+          fi
+
+      - name: Log in to GitHub Container Registry
+        if: steps.check_image.outputs.already_built == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU and Docker Buildx
+        if: steps.check_image.outputs.already_built == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Free Disk Space on Runner
+        if: steps.check_image.outputs.already_built == 'false'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo docker image prune -a -f || true
+
+      - name: Build and Push Kernel with AMD XDNA
+        if: steps.check_image.outputs.already_built == 'false'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          make kernel \
+            REGISTRY="ghcr.io/${{ github.repository_owner }}" \
+            TAG="${TAG}" \
+            PLATFORM="linux/amd64" \
+            PUSH=true
